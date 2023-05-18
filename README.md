@@ -10,7 +10,7 @@ Python implementation to sync between 2 folders
 ## How to run:
 1. install the required dependencies using `pip install -r requirements.txt` 
 2. Then set the folder1 and folder2 path variables
-3. python syncfolders.py
+3. To run use: `python sync_folders.py`
 
 Please keep note, this keeps only the changes added after the python program is run in sync between the 2 folders
 
