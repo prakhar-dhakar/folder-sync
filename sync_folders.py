@@ -76,16 +76,16 @@ class FolderSyncHandler(FileSystemEventHandler):
         Syncs a file between the 2 folders, copies from one folder to another
         """
         print("syncing")
+        if os.path.exists(file_path):
+            if self.folder1 in file_path and self.folder2 not in file_path:
+                destination_path = file_path.replace(self.folder1, self.folder2)
+                shutil.copy2(file_path, destination_path)
+                os.utime(destination_path, (timestamp, timestamp))
 
-        if self.folder1 in file_path and self.folder2 not in file_path:
-            destination_path = file_path.replace(self.folder1, self.folder2)
-            shutil.copy2(file_path, destination_path)
-            os.utime(destination_path, (timestamp, timestamp))
-
-        elif self.folder2 in file_path and self.folder1 not in file_path:
-            destination_path = file_path.replace(self.folder2, self.folder1)
-            shutil.copy2(file_path, destination_path)
-            os.utime(destination_path, (timestamp, timestamp))
+            elif self.folder2 in file_path and self.folder1 not in file_path:
+                destination_path = file_path.replace(self.folder2, self.folder1)
+                shutil.copy2(file_path, destination_path)
+                os.utime(destination_path, (timestamp, timestamp))
 
     def remove_file_from_other_folder(self, file_path):
         """
@@ -139,7 +139,6 @@ class FolderSyncHandler(FileSystemEventHandler):
         Watchdog event when a file is deleted in the folder
         """
         print("On deleted")
-        print(event,"event")
         if not event.is_directory:
             timestamp = time.time()
             self.enqueue_sync_event('deleted', event.src_path, timestamp)
@@ -153,11 +152,11 @@ if __name__ == "__main__":
     event_handler = FolderSyncHandler(folder1, folder2)
 
     observer1 = Observer()
-    observer1.schedule(event_handler, folder1, recursive=True)
+    observer1.schedule(event_handler, folder1, recursive=False)
     observer1.start()
 
     observer2 = Observer()
-    observer2.schedule(event_handler, folder2, recursive=True)
+    observer2.schedule(event_handler, folder2, recursive=False)
     observer2.start()
 
     try:
