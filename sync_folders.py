@@ -35,15 +35,6 @@ class FolderSyncHandler(FileSystemEventHandler):
             # Compare the hashes.
             return hash1.digest() == hash2.digest()
         return False
-    
-    def check_timestamp(self, filepath1, filepath2):
-        """
-        Checks whether the timestamp of the 2 files is same or not. Returns true if same
-        """
-        if os.path.exists(filepath1) and os.path.exists(filepath2):
-            print(os.path.getmtime(filepath1), os.path.getmtime(filepath2) )
-            return os.path.getmtime(filepath1) == os.path.getmtime(filepath2)
-        return False
 
     def synchronize_folders(self):
         """
@@ -52,11 +43,11 @@ class FolderSyncHandler(FileSystemEventHandler):
         with self.queue_lock:
             while not self.sync_queue.empty():
                 try:
-                    event_type, file_path, timestamp = self.sync_queue.get(block=False)
+                    event_type, file_path = self.sync_queue.get(block=False)
                     if event_type == 'created':
-                        self.sync_file_to_other_folder(file_path, timestamp)
+                        self.sync_file_to_other_folder(file_path)
                     elif event_type == 'modified':
-                        self.sync_file_to_other_folder(file_path, timestamp)
+                        self.sync_file_to_other_folder(file_path)
                     elif event_type == 'deleted':
                         self.remove_file_from_other_folder(file_path)
                 except Empty:
@@ -64,14 +55,14 @@ class FolderSyncHandler(FileSystemEventHandler):
             time.sleep(1)
         
 
-    def enqueue_sync_event(self, event_type, file_path, timestamp):
+    def enqueue_sync_event(self, event_type, file_path):
         """
         Adds an event to the queue that needs to be synced later
         """
         with self.queue_lock:
-            self.sync_queue.put((event_type, file_path, timestamp))
+            self.sync_queue.put((event_type, file_path))
 
-    def sync_file_to_other_folder(self, file_path, timestamp):
+    def sync_file_to_other_folder(self, file_path):
         """
         Syncs a file between the 2 folders, copies from one folder to another
         """
@@ -80,12 +71,10 @@ class FolderSyncHandler(FileSystemEventHandler):
             if self.folder1 in file_path and self.folder2 not in file_path:
                 destination_path = file_path.replace(self.folder1, self.folder2)
                 shutil.copy2(file_path, destination_path)
-                os.utime(destination_path, (timestamp, timestamp))
 
             elif self.folder2 in file_path and self.folder1 not in file_path:
                 destination_path = file_path.replace(self.folder2, self.folder1)
                 shutil.copy2(file_path, destination_path)
-                os.utime(destination_path, (timestamp, timestamp))
 
     def remove_file_from_other_folder(self, file_path):
         """
@@ -110,8 +99,7 @@ class FolderSyncHandler(FileSystemEventHandler):
         print("On created")
         if not event.is_directory:
             try:
-                timestamp = os.path.getmtime(event.src_path)
-                self.enqueue_sync_event('created', event.src_path, timestamp)
+                self.enqueue_sync_event('created', event.src_path)
             except FileNotFoundError:
                 print("File was not found")
 
@@ -124,13 +112,12 @@ class FolderSyncHandler(FileSystemEventHandler):
         if not event.is_directory:
             file_path = event.src_path
             try:
-                timestamp = os.path.getmtime(file_path)
                 if self.folder2 in file_path:
                     file_path2 = file_path.replace(self.folder2, self.folder1)
                 if self.folder1 in file_path:
                     file_path2 = file_path.replace(self.folder1, self.folder2)
                 if not self.check_md5(file_path, file_path2):
-                    self.enqueue_sync_event('modified', event.src_path, timestamp)
+                    self.enqueue_sync_event('modified', event.src_path)
             except FileNotFoundError:
                 print("File has been deleted")
 
@@ -140,8 +127,7 @@ class FolderSyncHandler(FileSystemEventHandler):
         """
         print("On deleted")
         if not event.is_directory:
-            timestamp = time.time()
-            self.enqueue_sync_event('deleted', event.src_path, timestamp)
+            self.enqueue_sync_event('deleted', event.src_path)
 
 
 if __name__ == "__main__":
