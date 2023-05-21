@@ -1,170 +1,121 @@
-from watchdog.observers import Observer
-from watchdog.events import FileSystemEventHandler
-import shutil
 import os
 import time
-from queue import Queue, Empty
+import queue
 import threading
-import hashlib
+import paramiko
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
 
-class FolderSyncHandler(FileSystemEventHandler):
-    def __init__(self, folder1, folder2):
-        self.folder1 = folder1
-        self.folder2 = folder2
-        self.sync_queue = Queue()
-        self.queue_lock = threading.Lock()
+class FileChangeHandler(FileSystemEventHandler):
+    """
+    Checks for events in the source folder and adds to the queue
+    """
+    def __init__(self, sync_server):
+        self.sync_server = sync_server
 
-    def check_md5(self, filepath1, filepath2):
-        """
-        Checks whether the md5 checksum of the files is same or not, if not returns False else True
-        """
+    def on_any_event(self, event):
+        if event.is_directory:
+            return
+        file_path = event.src_path
+        file_action = event.event_type
+        for file_action_queue in self.sync_server.file_action_queues:
+            file_action_queue.put((file_action, file_path))
 
-        if os.path.exists(filepath1) and os.path.exists(filepath2):
-            hash1 = hashlib.md5()
-            hash2 = hashlib.md5()
 
-            # Read the files and update the hashes.
-            with open(filepath1, "rb") as f:
-                for chunk in f:
-                    hash1.update(chunk)
+class SyncServer:
 
-            with open(filepath2, "rb") as f:
-                for chunk in f:
-                    hash2.update(chunk)
+    def __init__(self, source_folder, sync_interval=2):
+        self.source_folder = source_folder
+        self.sync_interval = sync_interval
+        self.file_action_queues = []
 
-            # Compare the hashes.
-            return hash1.digest() == hash2.digest()
-        return False
-    
-    def check_timestamp(self, filepath1, filepath2):
+    def add_client(self, client):
         """
-        Checks whether the timestamp of the 2 files is same or not. Returns true if same
+        Adds a client that needs to be synced with the server
         """
-        if os.path.exists(filepath1) and os.path.exists(filepath2):
-            print(os.path.getmtime(filepath1), os.path.getmtime(filepath2) )
-            return os.path.getmtime(filepath1) == os.path.getmtime(filepath2)
-        return False
+        file_action_queue = queue.Queue()
+        self.file_action_queues.append(file_action_queue)
+        threading.Thread(target=client.sync_files, args=(file_action_queue,)).start()
 
-    def synchronize_folders(self):
+    def monitor_files(self):
         """
-        Syncs the 2 folders together using the queue
+        Monitors changes in the source folder using the FileChangeHandler class
         """
-        with self.queue_lock:
-            while not self.sync_queue.empty():
-                try:
-                    event_type, file_path, timestamp = self.sync_queue.get(block=False)
-                    if event_type == 'created':
-                        self.sync_file_to_other_folder(file_path, timestamp)
-                    elif event_type == 'modified':
-                        self.sync_file_to_other_folder(file_path, timestamp)
-                    elif event_type == 'deleted':
-                        self.remove_file_from_other_folder(file_path)
-                except Empty:
-                    break
-            time.sleep(1)
-        
+        event_handler = FileChangeHandler(sync_server=self)
+        observer = Observer()
+        observer.schedule(event_handler, self.source_folder, recursive=False)
+        observer.start()
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            observer.stop()
+        observer.join()
 
-    def enqueue_sync_event(self, event_type, file_path, timestamp):
-        """
-        Adds an event to the queue that needs to be synced later
-        """
-        with self.queue_lock:
-            self.sync_queue.put((event_type, file_path, timestamp))
 
-    def sync_file_to_other_folder(self, file_path, timestamp):
-        """
-        Syncs a file between the 2 folders, copies from one folder to another
-        """
-        print("syncing")
-        if os.path.exists(file_path):
-            if self.folder1 in file_path and self.folder2 not in file_path:
-                destination_path = file_path.replace(self.folder1, self.folder2)
-                shutil.copy2(file_path, destination_path)
-                os.utime(destination_path, (timestamp, timestamp))
+class SyncClient:
 
-            elif self.folder2 in file_path and self.folder1 not in file_path:
-                destination_path = file_path.replace(self.folder2, self.folder1)
-                shutil.copy2(file_path, destination_path)
-                os.utime(destination_path, (timestamp, timestamp))
+    def __init__(self, host, port, username, password, destination_folder):
+        self.host = host
+        self.port = port
+        self.username = username
+        self.password = password
+        self.destination_folder = destination_folder
 
-    def remove_file_from_other_folder(self, file_path):
+    def create_directory(self, destination_path, sftp):
         """
-        Deletes files from both the folders
+        Checks if the directory exists or not on the client, if it does not exist, creates it
         """
-        print("deleting")
+        destination_dir = os.path.dirname(destination_path)
+        dir_exists = False
+        file_list = sftp.listdir(os.path.dirname(destination_dir))
+        if os.path.basename(destination_dir) in file_list:
+            dir_exists = True
+        if not dir_exists:
+            sftp.mkdir(destination_dir)
 
-        if self.folder1 in file_path and self.folder2 not in file_path:
-            destination_path = file_path.replace(self.folder1, self.folder2)
-            if os.path.exists(destination_path):
-                os.remove(destination_path)
-                
-        elif self.folder2 in file_path and self.folder1 not in file_path:
-            destination_path = file_path.replace(self.folder2, self.folder1)
-            if os.path.exists(destination_path):
-                os.remove(destination_path)
+    def sync_files(self, file_action_queue):
+        """
+        Syncs the files between the source and the client using the queue
+        """
+        transport = paramiko.Transport((self.host, self.port))
+        transport.connect(username=self.username, password=self.password)
+        sftp = transport.open_sftp_client()
 
-    def on_created(self, event):
-        """
-        Watchdog event that is triggered when a new file is created in the folder
-        """
-        print("On created")
-        if not event.is_directory:
+        while True:
             try:
-                timestamp = os.path.getmtime(event.src_path)
-                self.enqueue_sync_event('created', event.src_path, timestamp)
-            except FileNotFoundError:
-                print("File was not found")
+                file_action, file_path = file_action_queue.get(timeout=sync_server.sync_interval)
+                destination_path = file_path.replace(sync_server.source_folder, self.destination_folder)
+                if file_action == 'created' or file_action == 'modified':
+                    self.create_directory(destination_path, sftp)
+                    sftp.put(file_path, destination_path)
+                    print(f'Copied: {file_action} {file_path} -> {destination_path}')
 
+                elif file_action == 'deleted':
+                    try:
+                        sftp.remove(destination_path)
+                        print(f'Deleted: {destination_path}')
+                    except IOError:
+                        print(f'File not found: {destination_path}')
+                file_action_queue.task_done()
+            except queue.Empty:
+                pass
+            time.sleep(2)
 
-    def on_modified(self, event):
-        """
-        Watchdog event when a file is modified in the folder
-        """
-        print("On modified")
-        if not event.is_directory:
-            file_path = event.src_path
-            try:
-                timestamp = os.path.getmtime(file_path)
-                if self.folder2 in file_path:
-                    file_path2 = file_path.replace(self.folder2, self.folder1)
-                if self.folder1 in file_path:
-                    file_path2 = file_path.replace(self.folder1, self.folder2)
-                if not self.check_md5(file_path, file_path2):
-                    self.enqueue_sync_event('modified', event.src_path, timestamp)
-            except FileNotFoundError:
-                print("File has been deleted")
-
-    def on_deleted(self, event):
-        """
-        Watchdog event when a file is deleted in the folder
-        """
-        print("On deleted")
-        if not event.is_directory:
-            timestamp = time.time()
-            self.enqueue_sync_event('deleted', event.src_path, timestamp)
+        sftp.close()
+        transport.close()
 
 
 if __name__ == "__main__":
 
-    folder1 = '/Users/prakhar/Desktop/folder1'
-    folder2 = '/Users/prakhar/Desktop/folder2'
+    SOURCE_FOLDER = '/Users/prakhar/Desktop/folder1'
 
-    event_handler = FolderSyncHandler(folder1, folder2)
+    sync_server = SyncServer(SOURCE_FOLDER)
 
-    observer1 = Observer()
-    observer1.schedule(event_handler, folder1, recursive=False)
-    observer1.start()
+    # Add clients
+    client2 = SyncClient('client2_host', 22, 'client2_username', 'client2_password', '/path/to/destination/folder2')
 
-    observer2 = Observer()
-    observer2.schedule(event_handler, folder2, recursive=False)
-    observer2.start()
+    sync_server.add_client(client2)
 
-    try:
-        while True:
-            event_handler.synchronize_folders()
-            time.sleep(1)
-    except KeyboardInterrupt:
-        observer1.stop()
-        observer1.join()
-        observer2.stop()
-        observer2.join()
+    # Start file monitoring
+    threading.Thread(target=sync_server.monitor_files).start()
